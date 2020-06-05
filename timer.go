@@ -305,13 +305,17 @@ func (tw *TimeWheel) remove(task *Task) {
 }
 
 func (tw *TimeWheel) NewTimer(delay time.Duration) *Timer {
+	return tw.NewTimerByMode(delay, modeNotCircle, modeNotAsync)
+}
+
+func (tw *TimeWheel) NewTimerByMode(delay time.Duration, circle, async bool) *Timer {
 	queue := make(chan bool, 1) // buf = 1, refer to src/time/sleep.go
 	task := tw.addAny(delay,
 		func() {
 			notfiyChannel(queue)
 		},
-		modeNotCircle,
-		modeNotAsync,
+		circle,
+		async,
 	)
 
 	// init timer
@@ -328,13 +332,17 @@ func (tw *TimeWheel) NewTimer(delay time.Duration) *Timer {
 }
 
 func (tw *TimeWheel) AfterFunc(delay time.Duration, callback func()) *Timer {
+	return tw.AfterFuncByMode(delay, callback, modeNotCircle, modeNotAsync)
+}
+
+func (tw *TimeWheel) AfterFuncByMode(delay time.Duration, callback func(), circle, async bool) *Timer {
 	queue := make(chan bool, 1)
 	task := tw.addAny(delay,
 		func() {
 			callback()
 			notfiyChannel(queue)
 		},
-		modeNotCircle, modeIsAsync,
+		circle, async,
 	)
 
 	// init timer
@@ -349,6 +357,30 @@ func (tw *TimeWheel) AfterFunc(delay time.Duration, callback func()) *Timer {
 	}
 
 	return timer
+}
+
+func (tw *TimeWheel) NewTickerFunc(delay time.Duration, callback func()) *Ticker {
+	queue := make(chan bool, 1)
+	task := tw.addAny(delay,
+		func() {
+			callback()
+			notfiyChannel(queue)
+		},
+		modeIsCircle,
+		modeNotAsync,
+	)
+
+	// init ticker
+	ctx, cancel := context.WithCancel(context.Background())
+	ticker := &Ticker{
+		task:   task,
+		tw:     tw,
+		C:      queue,
+		Ctx:    ctx,
+		cancel: cancel,
+	}
+
+	return ticker
 }
 
 func (tw *TimeWheel) NewTicker(delay time.Duration) *Ticker {
@@ -409,20 +441,26 @@ type Timer struct {
 
 func (t *Timer) Reset(delay time.Duration) {
 	var task *Task
+	async := t.task.async
+	circle := t.task.circle
+
+	t.task.stop = true
+	t.tw.Remove(t.task)
+
 	if t.fn != nil { // use AfterFunc
 		task = t.tw.addAny(delay,
 			func() {
 				t.fn()
 				notfiyChannel(t.C)
 			},
-			modeNotCircle, modeIsAsync, // must async mode
+			circle, async, // must async mode
 		)
 	} else {
 		task = t.tw.addAny(delay,
 			func() {
 				notfiyChannel(t.C)
 			},
-			modeNotCircle, modeNotAsync)
+			circle, async)
 	}
 
 	t.task = task
