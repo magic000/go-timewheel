@@ -7,9 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/magic000/go-timewheel"
 	"github.com/shirou/gopsutil/cpu"
-
-	"code.byted.org/videoarch/timewheel"
 )
 
 const N = 50000
