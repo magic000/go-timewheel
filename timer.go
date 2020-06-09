@@ -1,8 +1,8 @@
 package timewheel
 
 import (
-	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,28 +20,21 @@ const (
 )
 
 type taskType int64
-type taskID int64
+type taskID uint64
 
 type Task struct {
 	delay    time.Duration
 	id       taskID
+	index    int
 	round    int
 	callback func()
 
 	async  bool
 	stop   bool
 	circle bool
+
+	add bool
 	// circleNum int
-}
-
-// for sync.Pool
-func (t *Task) Reset() {
-	t.round = 0
-	t.callback = nil
-
-	t.async = false
-	t.stop = false
-	t.circle = false
 }
 
 type optionCall func(*TimeWheel) error
@@ -53,40 +46,30 @@ func TickSafeMode() optionCall {
 	}
 }
 
-func SetSyncPool(state bool) optionCall {
-	return func(o *TimeWheel) error {
-		o.syncPool = state
-		return nil
-	}
-}
-
 type TimeWheel struct {
-	randomID int64
+	randomID uint64
 
 	tick      time.Duration
 	ticker    *time.Ticker
 	tickQueue chan time.Time
 
-	bucketsNum    int
-	buckets       []map[taskID]*Task // key: added item, value: *Task
-	bucketIndexes map[taskID]int     // key: added item, value: bucket position
+	bucketsNum int
+	buckets    []map[taskID]*Task // key: added item, value: *Task
 
 	currentIndex int
 
 	onceStart sync.Once
 
-	addC    chan *Task
-	removeC chan *Task
-	stopC   chan struct{}
+	addOrDelC chan *Task
+	stopC     chan struct{}
 
-	exited   bool
-	syncPool bool
+	exited bool
 }
 
 // NewTimeWheel create new time wheel
 func NewTimeWheel(tick time.Duration, bucketsNum int, options ...optionCall) (*TimeWheel, error) {
-	if tick.Seconds() < 0.1 {
-		return nil, errors.New("invalid params, must tick >= 100 ms")
+	if tick.Seconds() < 0.01 {
+		return nil, errors.New("invalid params, must tick >= 10 ms")
 	}
 	if bucketsNum <= 0 {
 		return nil, errors.New("invalid params, must bucketsNum > 0")
@@ -98,19 +81,17 @@ func NewTimeWheel(tick time.Duration, bucketsNum int, options ...optionCall) (*T
 		tickQueue: make(chan time.Time, 10),
 
 		// store
-		bucketsNum:    bucketsNum,
-		bucketIndexes: make(map[taskID]int, 1024*100),
-		buckets:       make([]map[taskID]*Task, bucketsNum),
-		currentIndex:  0,
+		bucketsNum:   bucketsNum,
+		buckets:      make([]map[taskID]*Task, bucketsNum),
+		currentIndex: 0,
 
 		// signal
-		addC:    make(chan *Task, 1024*5),
-		removeC: make(chan *Task, 1024*2),
-		stopC:   make(chan struct{}),
+		addOrDelC: make(chan *Task, 1024*1000),
+		stopC:     make(chan struct{}),
 	}
 
 	for i := 0; i < bucketsNum; i++ {
-		tw.buckets[i] = make(map[taskID]*Task, 16)
+		tw.buckets[i] = make(map[taskID]*Task, 1024)
 	}
 
 	for _, op := range options {
@@ -159,10 +140,12 @@ func (tw *TimeWheel) schduler() {
 		select {
 		case <-queue:
 			tw.handleTick()
-		case task := <-tw.addC:
-			tw.put(task)
-		case key := <-tw.removeC:
-			tw.remove(key)
+		case task := <-tw.addOrDelC:
+			if task.add {
+				tw.store(task)
+			} else {
+				tw.remove(task)
+			}
 		case <-tw.stopC:
 			tw.exited = true
 			tw.ticker.Stop()
@@ -176,21 +159,12 @@ func (tw *TimeWheel) Stop() {
 	tw.stopC <- struct{}{}
 }
 
-func (tw *TimeWheel) collectTask(task *Task) {
-	index := tw.bucketIndexes[task.id]
-	delete(tw.bucketIndexes, task.id)
-	delete(tw.buckets[index], task.id)
-
-	if tw.syncPool {
-		defaultTaskPool.put(task)
-	}
-}
-
 func (tw *TimeWheel) handleTick() {
 	bucket := tw.buckets[tw.currentIndex]
+	// fmt.Println(len(bucket), time.Now(), "----", len(tw.addOrDelC))
 	for k, task := range bucket {
 		if task.stop {
-			tw.collectTask(task)
+			delete(tw.buckets[task.index], task.id)
 			continue
 		}
 
@@ -203,18 +177,21 @@ func (tw *TimeWheel) handleTick() {
 			go task.callback()
 		} else {
 			// optimize gopool
-			task.callback()
+			if task.callback == nil {
+				fmt.Println("=+++++++++")
+			} else {
+				task.callback()
+			}
 		}
 
 		// circle
 		if task.circle == true {
-			tw.collectTask(task)
-			tw.putCircle(task, modeIsCircle)
+			tw.store(task)
 			continue
 		}
 
 		// gc
-		tw.collectTask(task)
+		delete(tw.buckets[task.index], task.id)
 	}
 
 	if tw.currentIndex == tw.bucketsNum-1 {
@@ -236,124 +213,85 @@ func (tw *TimeWheel) AddCron(delay time.Duration, callback func()) *Task {
 }
 
 func (tw *TimeWheel) addAny(delay time.Duration, callback func(), circle, async bool) *Task {
-	if delay <= 0 {
+	if delay <= tw.tick {
 		delay = tw.tick
 	}
 
 	id := tw.genUniqueID()
 
 	var task *Task
-	if tw.syncPool {
-		task = defaultTaskPool.get()
-	} else {
-		task = new(Task)
-	}
+	task = new(Task)
 
+	task.add = true
 	task.delay = delay
 	task.id = id
+	task.stop = false
 	task.callback = callback
 	task.circle = circle
 	task.async = async // refer to src/runtime/time.go
 
-	tw.addC <- task
+	tw.addOrDelC <- task
 	return task
 }
 
-func (tw *TimeWheel) put(task *Task) {
-	tw.store(task, false)
+func (tw *TimeWheel) store(task *Task) {
+	task.round, task.index = tw.calculateRoundIndex(task.delay)
+	tw.buckets[task.index][task.id] = task
 }
 
-func (tw *TimeWheel) putCircle(task *Task, circleMode bool) {
-	tw.store(task, circleMode)
-}
-
-func (tw *TimeWheel) store(task *Task, circleMode bool) {
-	round := tw.calculateRound(task.delay)
-	index := tw.calculateIndex(task.delay)
-
-	if round > 0 && circleMode {
-		task.round = round - 1
-	} else {
-		task.round = round
-	}
-
-	tw.bucketIndexes[task.id] = index
-	tw.buckets[index][task.id] = task
-}
-
-func (tw *TimeWheel) calculateRound(delay time.Duration) (round int) {
+func (tw *TimeWheel) calculateRoundIndex(delay time.Duration) (round int, index int) {
 	delaySeconds := delay.Seconds()
 	tickSeconds := tw.tick.Seconds()
 	round = int(delaySeconds / tickSeconds / float64(tw.bucketsNum))
-	return
-}
-
-func (tw *TimeWheel) calculateIndex(delay time.Duration) (index int) {
-	delaySeconds := delay.Seconds()
-	tickSeconds := tw.tick.Seconds()
-	index = (int(float64(tw.currentIndex) + delaySeconds/tickSeconds)) % tw.bucketsNum
+	index = (int(float64(tw.currentIndex+1) + delaySeconds/tickSeconds)) % tw.bucketsNum
 	return
 }
 
 func (tw *TimeWheel) Remove(task *Task) error {
-	tw.removeC <- task
+	task.add = false
+	tw.addOrDelC <- task
 	return nil
 }
 
 func (tw *TimeWheel) remove(task *Task) {
-	tw.collectTask(task)
+	delete(tw.buckets[task.index], task.id)
 }
 
 func (tw *TimeWheel) NewTimer(delay time.Duration) *Timer {
-	return tw.NewTimerByMode(delay, modeNotCircle, modeNotAsync)
-}
-
-func (tw *TimeWheel) NewTimerByMode(delay time.Duration, circle, async bool) *Timer {
 	queue := make(chan bool, 1) // buf = 1, refer to src/time/sleep.go
 	task := tw.addAny(delay,
 		func() {
 			notfiyChannel(queue)
 		},
-		circle,
-		async,
+		modeNotCircle,
+		modeNotAsync,
 	)
 
 	// init timer
-	ctx, cancel := context.WithCancel(context.Background())
 	timer := &Timer{
-		tw:     tw,
-		C:      queue, // faster
-		task:   task,
-		Ctx:    ctx,
-		cancel: cancel,
+		tw:   tw,
+		C:    queue, // faster
+		task: task,
 	}
 
 	return timer
 }
 
 func (tw *TimeWheel) AfterFunc(delay time.Duration, callback func()) *Timer {
-	return tw.AfterFuncByMode(delay, callback, modeNotCircle, modeNotAsync)
-}
-
-func (tw *TimeWheel) AfterFuncByMode(delay time.Duration, callback func(), circle, async bool) *Timer {
 	queue := make(chan bool, 1)
 	task := tw.addAny(delay,
 		func() {
 			callback()
 			notfiyChannel(queue)
 		},
-		circle, async,
+		modeNotCircle, modeNotAsync,
 	)
 
-	// init timer
-	ctx, cancel := context.WithCancel(context.Background())
 	timer := &Timer{
-		tw:     tw,
-		C:      queue, // faster
-		task:   task,
-		Ctx:    ctx,
-		cancel: cancel,
-		fn:     callback,
+		tw:   tw,
+		C:    queue, // faster
+		task: task,
+		fn:   callback,
 	}
 
 	return timer
@@ -371,13 +309,10 @@ func (tw *TimeWheel) NewTickerFunc(delay time.Duration, callback func()) *Ticker
 	)
 
 	// init ticker
-	ctx, cancel := context.WithCancel(context.Background())
 	ticker := &Ticker{
-		task:   task,
-		tw:     tw,
-		C:      queue,
-		Ctx:    ctx,
-		cancel: cancel,
+		task: task,
+		tw:   tw,
+		C:    queue,
 	}
 
 	return ticker
@@ -394,13 +329,10 @@ func (tw *TimeWheel) NewTicker(delay time.Duration) *Ticker {
 	)
 
 	// init ticker
-	ctx, cancel := context.WithCancel(context.Background())
 	ticker := &Ticker{
-		task:   task,
-		tw:     tw,
-		C:      queue,
-		Ctx:    ctx,
-		cancel: cancel,
+		task: task,
+		tw:   tw,
+		C:    queue,
 	}
 
 	return ticker
@@ -434,9 +366,6 @@ type Timer struct {
 	tw   *TimeWheel
 	fn   func() // external custom func
 	C    chan bool
-
-	cancel context.CancelFunc
-	Ctx    context.Context
 }
 
 func (t *Timer) Reset(delay time.Duration) {
@@ -468,7 +397,6 @@ func (t *Timer) Reset(delay time.Duration) {
 
 func (t *Timer) Stop() {
 	t.task.stop = true
-	t.cancel()
 	t.tw.Remove(t.task)
 }
 
@@ -477,17 +405,14 @@ func (t *Timer) StopFunc(callback func()) {
 }
 
 type Ticker struct {
-	tw     *TimeWheel
-	task   *Task
-	cancel context.CancelFunc
+	tw   *TimeWheel
+	task *Task
 
-	C   chan bool
-	Ctx context.Context
+	C chan bool
 }
 
 func (t *Ticker) Stop() {
 	t.task.stop = true
-	t.cancel()
 	t.tw.Remove(t.task)
 }
 
@@ -499,6 +424,6 @@ func notfiyChannel(q chan bool) {
 }
 
 func (tw *TimeWheel) genUniqueID() taskID {
-	id := atomic.AddInt64(&tw.randomID, 1)
+	id := atomic.AddUint64(&tw.randomID, 1)
 	return taskID(id)
 }

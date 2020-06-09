@@ -29,6 +29,5 @@ func (pool *taskPool) get() *Task {
 }
 
 func (pool *taskPool) put(obj *Task) {
-	obj.Reset()
 	pool.bp.Put(obj)
 }

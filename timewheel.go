@@ -5,8 +5,10 @@ import (
 )
 
 var (
-	DefaultTimeWheel, _ = NewTimeWheel(100*time.Millisecond, 300)
+	DefaultTimeWheel, _ = NewTimeWheel(50*time.Millisecond, 100, TickSafeMode())
 )
+
+// var DefaultTimeWheel *TimeWheel
 
 func init() {
 	DefaultTimeWheel.Start()

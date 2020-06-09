@@ -28,12 +28,11 @@ func checkTimeCost(t *testing.T, start, end time.Time, before int, after int) bo
 
 func TestCalcPos(t *testing.T) {
 	tw, _ := NewTimeWheel(100*time.Millisecond, 5)
-	round := tw.calculateRound(1 * time.Second)
+	round, idx := tw.calculateRoundIndex(1 * time.Second)
 	if round != 2 {
 		t.Error("round err")
 	}
 
-	idx := tw.calculateIndex(1 * time.Second)
 	if idx != 0 {
 		t.Error("idx err")
 	}
