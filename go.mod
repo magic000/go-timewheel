@@ -1,4 +1,4 @@
-module github.com/magic000/go-timewheel
+module code.byted.org/videoarch/nss/src/go-timewheel
 
 go 1.14
 
