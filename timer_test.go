@@ -14,12 +14,12 @@ func callback() {
 func checkTimeCost(t *testing.T, start, end time.Time, before int, after int) bool {
 	due := end.Sub(start)
 	if due > time.Duration(after)*time.Millisecond {
-		t.Error("delay run")
+		t.Error("delay run", due)
 		return false
 	}
 
 	if due < time.Duration(before)*time.Millisecond {
-		t.Error("run ahead")
+		t.Error("run ahead", due)
 		return false
 	}
 
@@ -28,7 +28,7 @@ func checkTimeCost(t *testing.T, start, end time.Time, before int, after int) bo
 
 func TestCalcPos(t *testing.T) {
 	tw, _ := NewTimeWheel(100*time.Millisecond, 5)
-	round, idx := tw.calculateRoundIndex(1 * time.Second)
+	round, idx := tw.calculateRoundIndex(1*time.Second, false)
 	if round != 2 {
 		t.Error("round err")
 	}
@@ -39,14 +39,14 @@ func TestCalcPos(t *testing.T) {
 }
 
 func TestAddFunc(t *testing.T) {
-	tw, _ := NewTimeWheel(100*time.Millisecond, 5, TickSafeMode(), SetSyncPool(true))
+	tw, _ := NewTimeWheel(100*time.Millisecond, 5, TickSafeMode())
 	tw.Start()
 	defer tw.Stop()
 
 	for index := 1; index < 6; index++ {
 		queue := make(chan bool, 0)
 		start := time.Now()
-		tw.Add(time.Duration(index)*time.Second, func() {
+		tw.AfterFunc(time.Duration(index)*time.Second, func() {
 			queue <- true
 		})
 
@@ -64,13 +64,16 @@ func TestAddStopCron(t *testing.T) {
 	tw.Start()
 	defer tw.Stop()
 
-	queue := make(chan time.Time, 2)
-	task := tw.AddCron(time.Second*1, func() {
-		queue <- time.Now()
-	})
+	// queue := make(chan time.Time, 2)
+	// task := tw.AddCron(time.Second*1, func() {
+	// 	queue <- time.Now()
+	// })
+	ti := tw.NewTicker(time.Second * 1)
+	queue := ti.C
 
 	time.AfterFunc(5*time.Second, func() {
-		tw.Remove(task)
+		// tw.Remove(task)
+		ti.Stop()
 	})
 
 	exitTimer := time.NewTimer(10 * time.Second)
@@ -84,11 +87,11 @@ func TestAddStopCron(t *testing.T) {
 			}
 			return
 
-		case now := <-queue:
+		case <-queue:
 			c++
-			checkTimeCost(t, lastTs, now, 900, 1200)
-			fmt.Println("time since: ", now.Sub(lastTs))
-			lastTs = now
+			checkTimeCost(t, lastTs, time.Now(), 900, 1200)
+			fmt.Println("time since: ", time.Now().Sub(lastTs))
+			lastTs = time.Now()
 		}
 	}
 }
@@ -183,7 +186,6 @@ func TestTickerSecond(t *testing.T) {
 			fmt.Println(time.Since(last))
 			last = time.Now()
 
-		case <-ticker.Ctx.Done():
 			return
 		}
 	}
@@ -207,7 +209,6 @@ func TestBatchTicker(t *testing.T) {
 			for {
 				select {
 				case <-ticker.C:
-				case <-ticker.Ctx.Done():
 					return
 				}
 			}
@@ -277,29 +278,6 @@ func TestTimerReset(t *testing.T) {
 	}
 }
 
-func TestRemove(t *testing.T) {
-	tw, _ := NewTimeWheel(100*time.Millisecond, 5)
-	tw.Start()
-	defer tw.Stop()
-
-	queue := make(chan bool, 0)
-	task := tw.Add(time.Millisecond*500, func() {
-		queue <- true
-	})
-
-	// remove action after add action
-	time.AfterFunc(time.Millisecond*10, func() {
-		tw.Remove(task)
-	})
-
-	exitTimer := time.NewTimer(1 * time.Second)
-	select {
-	case <-exitTimer.C:
-	case <-queue:
-		t.Error("must not run")
-	}
-}
-
 func TestHwTimer(t *testing.T) {
 	tw, _ := NewTimeWheel(100*time.Millisecond, 60)
 	tw.Start()
@@ -331,14 +309,4 @@ func TestHwTimer(t *testing.T) {
 		}(index)
 	}
 	wg.Wait()
-}
-
-func BenchmarkAdd(b *testing.B) {
-	tw, _ := NewTimeWheel(100*time.Millisecond, 60)
-	tw.Start()
-	defer tw.Stop()
-
-	for i := 0; i < b.N; i++ {
-		tw.Add(time.Second, func() {})
-	}
 }

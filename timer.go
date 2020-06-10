@@ -2,7 +2,6 @@ package timewheel
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,7 +85,7 @@ func NewTimeWheel(tick time.Duration, bucketsNum int, options ...optionCall) (*T
 		currentIndex: 0,
 
 		// signal
-		addOrDelC: make(chan *Task, 1024*1000),
+		addOrDelC: make(chan *Task, 1024*100),
 		stopC:     make(chan struct{}),
 	}
 
@@ -142,7 +141,7 @@ func (tw *TimeWheel) schduler() {
 			tw.handleTick()
 		case task := <-tw.addOrDelC:
 			if task.add {
-				tw.store(task)
+				tw.store(task, false)
 			} else {
 				tw.remove(task)
 			}
@@ -161,7 +160,6 @@ func (tw *TimeWheel) Stop() {
 
 func (tw *TimeWheel) handleTick() {
 	bucket := tw.buckets[tw.currentIndex]
-	// fmt.Println(len(bucket), time.Now(), "----", len(tw.addOrDelC))
 	for k, task := range bucket {
 		if task.stop {
 			delete(tw.buckets[task.index], task.id)
@@ -177,16 +175,13 @@ func (tw *TimeWheel) handleTick() {
 			go task.callback()
 		} else {
 			// optimize gopool
-			if task.callback == nil {
-				fmt.Println("=+++++++++")
-			} else {
-				task.callback()
-			}
+			task.callback()
 		}
 
 		// circle
-		if task.circle == true {
-			tw.store(task)
+		if task.circle {
+			delete(tw.buckets[task.index], task.id)
+			tw.store(task, true)
 			continue
 		}
 
@@ -202,19 +197,9 @@ func (tw *TimeWheel) handleTick() {
 	tw.currentIndex++
 }
 
-// Add add an task
-func (tw *TimeWheel) Add(delay time.Duration, callback func()) *Task {
-	return tw.addAny(delay, callback, modeNotCircle, modeIsAsync)
-}
-
-// AddCron add interval task
-func (tw *TimeWheel) AddCron(delay time.Duration, callback func()) *Task {
-	return tw.addAny(delay, callback, modeIsCircle, modeIsAsync)
-}
-
 func (tw *TimeWheel) addAny(delay time.Duration, callback func(), circle, async bool) *Task {
-	if delay <= tw.tick {
-		delay = tw.tick
+	if delay < tw.tick {
+		delay = tw.tick / 2
 	}
 
 	id := tw.genUniqueID()
@@ -234,16 +219,20 @@ func (tw *TimeWheel) addAny(delay time.Duration, callback func(), circle, async 
 	return task
 }
 
-func (tw *TimeWheel) store(task *Task) {
-	task.round, task.index = tw.calculateRoundIndex(task.delay)
+func (tw *TimeWheel) store(task *Task, circle bool) {
+	task.round, task.index = tw.calculateRoundIndex(task.delay, circle)
 	tw.buckets[task.index][task.id] = task
 }
 
-func (tw *TimeWheel) calculateRoundIndex(delay time.Duration) (round int, index int) {
+func (tw *TimeWheel) calculateRoundIndex(delay time.Duration, circle bool) (round int, index int) {
 	delaySeconds := delay.Seconds()
 	tickSeconds := tw.tick.Seconds()
-	round = int(delaySeconds / tickSeconds / float64(tw.bucketsNum))
-	index = (int(float64(tw.currentIndex+1) + delaySeconds/tickSeconds)) % tw.bucketsNum
+	currentIndex := tw.currentIndex
+	if circle {
+		currentIndex++
+	}
+	round = int((delaySeconds / tickSeconds) / float64(tw.bucketsNum))
+	index = (int(float64(currentIndex) + delaySeconds/tickSeconds)) % tw.bucketsNum
 	return
 }
 

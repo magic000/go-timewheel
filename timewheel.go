@@ -4,31 +4,16 @@ import (
 	"time"
 )
 
-var (
-	DefaultTimeWheel, _ = NewTimeWheel(50*time.Millisecond, 100, TickSafeMode())
-)
-
-// var DefaultTimeWheel *TimeWheel
+var DefaultTimeWheel *TimeWheel
 
 func init() {
+	DefaultTimeWheel, _ = NewTimeWheel(50*time.Millisecond, 100, TickSafeMode())
 	DefaultTimeWheel.Start()
 }
 
 func ResetDefaultTimeWheel(tw *TimeWheel) {
 	tw.Start()
 	DefaultTimeWheel = tw
-}
-
-func Add(delay time.Duration, callback func()) *Task {
-	return DefaultTimeWheel.Add(delay, callback)
-}
-
-func AddCron(delay time.Duration, callback func()) *Task {
-	return DefaultTimeWheel.AddCron(delay, callback)
-}
-
-func Remove(task *Task) error {
-	return DefaultTimeWheel.Remove(task)
 }
 
 func NewTimer(delay time.Duration) *Timer {
